@@ -1,10 +1,11 @@
-use btleplug::api::{Central, Characteristic, Manager as _, Peripheral, ScanFilter, WriteType};
+use btleplug::api::Peripheral as Device;
+use btleplug::api::{Central, Characteristic, Manager as _, ScanFilter, WriteType};
 use btleplug::platform::Manager;
 use std::env;
 use tokio::time::{Duration, sleep};
 
-async fn read_height(peripheral: &impl Peripheral, char: &Characteristic) -> u32 {
-    let rs_bytes = peripheral.read(char).await;
+async fn read_desk_height(device: &impl Device, char: &Characteristic) -> u32 {
+    let rs_bytes = device.read(char).await;
     let Ok(bytes) = rs_bytes else { return 0 };
     if bytes.len() < 2 {
         return 0;
@@ -14,12 +15,12 @@ async fn read_height(peripheral: &impl Peripheral, char: &Characteristic) -> u32
     (600 + value / 10).into()
 }
 
-async fn write_direction(peripheral: &impl Peripheral, char: &Characteristic, dir: [u8; 2]) {
-    let pin = peripheral.write(char, &dir, WriteType::WithoutResponse);
+async fn move_desk_to(device: &impl Device, char: &Characteristic, dir: [u8; 2]) {
+    let pin = device.write(char, &dir, WriteType::WithoutResponse);
     pin.await.unwrap_or_default();
 }
 
-async fn move_desk_to(peripheral: &impl Peripheral, target: u32) {
+async fn move_desk_to_target(device: &impl Device, target: u32) {
     const DESK_MARGIN: u32 = 10;
     const MOVE_UP: [u8; 2] = [0x47, 0x00];
     const MOVE_DOWN: [u8; 2] = [0x46, 0x00];
@@ -27,14 +28,14 @@ async fn move_desk_to(peripheral: &impl Peripheral, target: u32) {
     const READ_CHAR_UUID: &str = "99fa0021-338a-1024-8a49-009c0215f78a";
     const MOVE_CHAR_UUID: &str = "99fa0002-338a-1024-8a49-009c0215f78a";
 
-    let chars = peripheral.characteristics();
+    let chars = device.characteristics();
     let op_read = chars.iter().find(|p| p.uuid.to_string() == READ_CHAR_UUID);
     let op_move = chars.iter().find(|p| p.uuid.to_string() == MOVE_CHAR_UUID);
     let Some(read_char) = op_read else { return };
     let Some(move_char) = op_move else { return };
 
     let mut elapsed = 0;
-    let mut current = read_height(peripheral, read_char).await;
+    let mut current = read_desk_height(device, read_char).await;
 
     println!("Moving...");
     println!("→ {current} → {target}\n");
@@ -45,8 +46,8 @@ async fn move_desk_to(peripheral: &impl Peripheral, target: u32) {
     let move_desk = async |dir: [u8; 2], arrow: &str, current: u32| -> (u32, u32) {
         print!("\x1B[1A\x1B[2K");
         println!("{} {current} → {target}", arrow);
-        write_direction(peripheral, move_char, dir).await;
-        let new_current = read_height(peripheral, read_char).await;
+        move_desk_to(device, move_char, dir).await;
+        let new_current = read_desk_height(device, read_char).await;
         let elapsed = new_current.abs_diff(current);
         (new_current, elapsed)
     };
@@ -63,54 +64,73 @@ async fn move_desk_to(peripheral: &impl Peripheral, target: u32) {
         }
     }
 
-    write_direction(peripheral, move_char, MOVE_STOP).await;
-    println!("→ {}", read_height(peripheral, read_char).await);
+    move_desk_to(device, move_char, MOVE_STOP).await;
+    println!("→ {}", read_desk_height(device, read_char).await);
 }
 
-async fn scan_peripherals() {
-    let manager = Manager::new().await.unwrap();
-    let adapters = manager.adapters().await;
-    let adapter = adapters.unwrap().into_iter().next().unwrap();
-    adapter.start_scan(ScanFilter::default()).await.unwrap();
-    sleep(Duration::from_millis(2000)).await;
-    let rs_periphs = adapter.peripherals().await;
-    let Ok(periphs) = rs_periphs else { return };
-    for p in periphs {
-        println!("→ {}", p);
-    }
-}
-
-async fn connect_and_move_desk_to(target: u32, mac: &str) {
+async fn connect_and_move_desk_to_target(target: u32, mac: &str) {
     println!("Scanning...");
-    let manager = Manager::new().await.unwrap();
+    let rs_manager = Manager::new().await;
+    let Ok(manager) = rs_manager else { return };
     let adapters = manager.adapters().await;
-    let adapter = adapters.unwrap().into_iter().next().unwrap();
-    adapter.start_scan(ScanFilter::default()).await.unwrap();
+    let op_adapter = adapters.unwrap_or_default().into_iter().next();
+    let Some(adapter) = op_adapter else { return };
+    if adapter.start_scan(ScanFilter::default()).await.is_err() {
+        println!("Failed to scan!");
+        return;
+    }
 
     for _ in 0..10 {
-        let periphs = adapter.peripherals().await.unwrap();
-        let op_periph = periphs.iter().find(|p| p.address().to_string() == mac);
-        let Some(periph) = op_periph else {
+        let rs_devices = adapter.peripherals().await;
+        let Ok(devices) = rs_devices else { return };
+        let op_device = devices.iter().find(|p| p.address().to_string() == mac);
+        let Some(device) = op_device else {
             sleep(Duration::from_millis(200)).await;
             continue;
         };
 
         println!("Connecting...");
-        let _ = periph.connect().await;
-        let _ = periph.discover_services().await;
+        if device.connect().await.is_err() {
+            println!("Failed to connect!");
+            return;
+        }
+        if device.discover_services().await.is_err() {
+            println!("Failed to discover services!");
+            return;
+        }
 
-        move_desk_to(periph, target).await;
+        move_desk_to_target(device, target).await;
         println!("Disconnecting...");
-        let _ = periph.disconnect().await;
+        if device.disconnect().await.is_err() {
+            println!("Failed to disconnect!");
+            return;
+        }
         return;
     }
-
     println!("Could not find device [{}]", mac);
+}
+
+async fn scan_and_print_devices() {
+    let rs_manager = Manager::new().await;
+    let Ok(manager) = rs_manager else { return };
+    let adapters = manager.adapters().await;
+    let op_adapter = adapters.unwrap_or_default().into_iter().next();
+    let Some(adapter) = op_adapter else { return };
+    if adapter.start_scan(ScanFilter::default()).await.is_err() {
+        println!("Failed to scan!");
+        return;
+    }
+    sleep(Duration::from_millis(2000)).await;
+    let rs_devices = adapter.peripherals().await;
+    let Ok(devices) = rs_devices else { return };
+    for device in devices {
+        println!("→ {}", device);
+    }
 }
 
 #[tokio::main]
 async fn main() {
-    use std::io::{Write, stdin, stdout};
+    use std::io::Write;
     let mut input = String::new();
 
     let args = env::args().collect::<Vec<String>>();
@@ -118,20 +138,22 @@ async fn main() {
         &args[1].trim()
     } else {
         println!("No mac address provided, scanning...");
-        scan_peripherals().await;
+        scan_and_print_devices().await;
         return;
     };
 
     println!("Target device [{}]", mac);
     print!("Move Desk Height (820 - 1250 mm): ");
-    let _ = stdout().flush();
-    stdin().read_line(&mut input).unwrap();
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stdin().read_line(&mut input);
 
     let rs_target = input.trim().parse::<u32>();
     let Ok(target) = rs_target else { return };
 
-    if (820..=1250).contains(&target) {
-        connect_and_move_desk_to(target - 20, mac).await;
+    const DESK_MIN: u32 = 820;
+    const DESK_MAX: u32 = 1250;
+    if (DESK_MIN..=DESK_MAX).contains(&target) {
+        connect_and_move_desk_to_target(target - 20, mac).await;
     } else {
         println!("Expected value between 820 and 1250!");
     }
