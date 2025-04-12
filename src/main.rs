@@ -12,7 +12,8 @@ async fn read_desk_height(device: &impl Device, char: &Characteristic) -> u32 {
     }
     let bytes = [bytes[0], bytes[1]];
     let value = u16::from_le_bytes(bytes);
-    (600 + value / 10).into()
+    const DESK_MIN_HEIGHT: u16 = 625;
+    (DESK_MIN_HEIGHT + value / 10).into()
 }
 
 async fn move_desk_to(device: &impl Device, char: &Characteristic, dir: [u8; 2]) {
@@ -153,7 +154,7 @@ async fn main() {
     const DESK_MIN: u32 = 820;
     const DESK_MAX: u32 = 1250;
     if (DESK_MIN..=DESK_MAX).contains(&target) {
-        connect_and_move_desk_to_target(target - 20, mac).await;
+        connect_and_move_desk_to_target(target, mac).await;
     } else {
         println!("Expected value between 820 and 1250!");
     }
