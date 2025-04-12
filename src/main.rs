@@ -22,7 +22,7 @@ async fn move_desk_to(device: &impl Device, char: &Characteristic, dir: [u8; 2])
 }
 
 async fn move_desk_to_target(device: &impl Device, target: u32) {
-    const DESK_MARGIN: u32 = 10;
+    const DESK_MARGIN: u32 = 5;
     const MOVE_UP: [u8; 2] = [0x47, 0x00];
     const MOVE_DOWN: [u8; 2] = [0x46, 0x00];
     const MOVE_STOP: [u8; 2] = [0x00, 0x00];
@@ -45,6 +45,10 @@ async fn move_desk_to_target(device: &impl Device, target: u32) {
     }
 
     let move_desk = async |dir: [u8; 2], arrow: &str, current: u32| -> (u32, u32) {
+        if current.abs_diff(target) > DESK_MARGIN {
+            sleep(Duration::from_millis(50)).await;
+        }
+
         print!("\x1B[1A\x1B[2K");
         println!("{} {current} → {target}", arrow);
         move_desk_to(device, move_char, dir).await;
@@ -56,12 +60,10 @@ async fn move_desk_to_target(device: &impl Device, target: u32) {
     if current < target {
         while current + elapsed < target {
             (current, elapsed) = move_desk(MOVE_UP, "↑", current).await;
-            sleep(Duration::from_millis(50)).await;
         }
     } else {
         while current - elapsed > target {
             (current, elapsed) = move_desk(MOVE_DOWN, "↓", current).await;
-            sleep(Duration::from_millis(50)).await;
         }
     }
 
